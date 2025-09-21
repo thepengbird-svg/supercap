@@ -1,604 +1,541 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-올인원 PDF 캡처 & 크롭 프로그램
-사용자 친화적 GUI로 캡처부터 PDF 생성까지 완전 자동화
+SUPER CAPT - All-in-One PDF Capture & Crop Tool
+User-friendly GUI for fully automated screen capture to PDF creation.
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, simpledialog
-import pyautogui
-import cv2
-import numpy as np
+import sys
 import os
 import time
-from PIL import Image
-from datetime import datetime
 import threading
+import subprocess
+from datetime import datetime
 
-class PDFCaptureApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("올인원 PDF 캡처 & 크롭 프로그램 v1.0")
-        self.root.geometry("600x700")
-        self.root.resizable(False, False)
+# --- Library Installation Check ---
+try:
+    from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+                                   QLabel, QSpinBox, QComboBox, QLineEdit, QFileDialog,
+                                   QMessageBox, QProgressBar, QTextEdit, QFrame, QScrollArea)
+    from PySide6.QtGui import QFont, QIcon, QScreen, QPainter, QPen, QColor
+    from PySide6.QtCore import Qt, Signal, QObject, QRect
+    import pyautogui
+    from PIL import Image
+except ImportError as e:
+    missing_lib = str(e).split("'")[1]
+    print(f"Required library not found: {missing_lib}")
+    print(f"Attempting to install '{missing_lib}'...")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", f"{missing_lib}"])
+        print("Installation successful. Please restart the application.")
+    except Exception as install_e:
+        print(f"Failed to install {missing_lib}. Please install it manually: pip install {missing_lib}")
+        print(f"Error: {install_e}")
+    sys.exit()
+
+# --- Custom Widget for Collapsible Section ---
+class CollapsibleBox(QWidget):
+    def __init__(self, title="", parent=None):
+        super(CollapsibleBox, self).__init__(parent)
+        self.toggle_button = QPushButton(f"▼ {title}")
+        self.toggle_button.setStyleSheet("QPushButton { text-align: left; border: none; font-weight: bold; }")
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(False)
+
+        self.content_area = QScrollArea()
+        self.content_area.setMaximumHeight(0)
+        self.content_area.setMinimumHeight(0)
+        self.content_area.setWidgetResizable(True)
+        self.content_area.setFrameShape(QFrame.NoFrame)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(0)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.toggle_button)
+        layout.addWidget(self.content_area)
+
+        self.toggle_button.toggled.connect(self.toggle)
+        self.toggle(False)
+
+    def setContentLayout(self, layout):
+        content_widget = QWidget()
+        content_widget.setLayout(layout)
+        self.content_area.setWidget(content_widget)
+
+    def toggle(self, checked):
+        if checked:
+            self.toggle_button.setText(f"▲ {self.toggle_button.text().split(' ')[1]}")
+            self.content_area.setMaximumHeight(self.content_area.widget().sizeHint().height() + 10)
+        else:
+            self.toggle_button.setText(f"▼ {self.toggle_button.text().split(' ')[1]}")
+            self.content_area.setMaximumHeight(0)
+
+# --- Transparent Overlay for Crop Selection ---
+class SnippingWidget(QWidget):
+    on_snipped = Signal(QRect)
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
         
-        # 변수 초기화
-        self.total_pages = tk.IntVar(value=200)
-        self.page_key = tk.StringVar(value="pagedown")
-        self.output_folder = tk.StringVar(value=os.path.join(os.path.expanduser("~"), "Desktop"))
+        screen = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen)
+        
+        self.begin = None
+        self.end = None
+
+    def paintEvent(self, event):
+        if self.begin and self.end:
+            rect = QRect(self.begin, self.end).normalized()
+            painter = QPainter(self)
+            painter.setPen(QPen(QColor(0, 120, 215, 255), 2))
+            painter.setBrush(QColor(0, 120, 215, 50))
+            painter.drawRect(rect)
+
+    def mousePressEvent(self, event):
+        self.begin = event.pos()
+        self.end = event.pos()
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        self.end = event.pos()
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        self.close()
+        rect = QRect(self.begin, self.end).normalized()
+        self.on_snipped.emit(rect)
+
+# --- Main Application ---
+class SuperCaptApp(QWidget):
+    class Communicate(QObject):
+        log_signal = Signal(str)
+        progress_signal = Signal(int, str)
+        step_signal = Signal(int, str)
+        finished_signal = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.comm = self.Communicate()
+        self.comm.log_signal.connect(self.log)
+        self.comm.progress_signal.connect(self.update_progress)
+        self.comm.step_signal.connect(self.update_step)
+        self.comm.finished_signal.connect(self.process_completed)
+
         self.crop_area = None
         self.is_capturing = False
         self.is_paused = False
-        self.current_page = 0
+        self.capture_thread = None
+        self.snipping_widget = None
+
+        self.init_ui()
+
+    def init_ui(self):
+        self.setWindowTitle("SUPER CAPT")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.setFixedWidth(400)
+
+        # --- Main Layout ---
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(10)
+
+        # --- Title ---
+        title_label = QLabel("SUPER CAPT")
+        title_label.setFont(QFont("Arial", 16, QFont.Bold))
+        title_label.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(title_label)
+
+        # --- Collapsible Settings ---
+        settings_box = CollapsibleBox("Settings")
+        main_layout.addWidget(settings_box)
         
-        self.setup_ui()
+        settings_layout = QVBoxLayout()
         
-    def setup_ui(self):
-        """UI 구성"""
-        # 메인 프레임
-        main_frame = ttk.Frame(self.root, padding="20")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        # 제목
-        title_label = ttk.Label(main_frame, text="PDF 캡처 & 크롭 프로그램", 
-                               font=("Arial", 16, "bold"))
-        title_label.grid(row=0, column=0, columnspan=2, pady=(0, 20))
-        
-        # 설정 섹션
-        settings_frame = ttk.LabelFrame(main_frame, text="설정", padding="10")
-        settings_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 20))
-        
-        # 페이지 수 설정
-        ttk.Label(settings_frame, text="총 페이지 수:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        page_spinbox = ttk.Spinbox(settings_frame, from_=1, to=2000, width=10, 
-                                  textvariable=self.total_pages)
-        page_spinbox.grid(row=0, column=1, sticky=tk.W, padx=(10, 0), pady=5)
-        
-        # 페이지 넘기기 키 설정
-        ttk.Label(settings_frame, text="페이지 넘기기 키:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        key_frame = ttk.Frame(settings_frame)
-        key_frame.grid(row=1, column=1, sticky=tk.W, padx=(10, 0), pady=5)
-        
-        # 키 선택 라디오 버튼
-        keys = [("Page Down", "pagedown"), ("스페이스바", "space"), 
-                ("엔터", "enter"), ("오른쪽 화살표", "right"), ("아래 화살표", "down")]
-        
-        for i, (text, value) in enumerate(keys):
-            ttk.Radiobutton(key_frame, text=text, variable=self.page_key, 
-                           value=value).grid(row=i//3, column=i%3, sticky=tk.W, padx=5)
-        
-        # 저장 위치 설정
-        ttk.Label(settings_frame, text="저장 위치:").grid(row=3, column=0, sticky=tk.W, pady=5)
-        folder_frame = ttk.Frame(settings_frame)
-        folder_frame.grid(row=3, column=1, sticky=(tk.W, tk.E), padx=(10, 0), pady=5)
-        
-        ttk.Entry(folder_frame, textvariable=self.output_folder, width=30).grid(row=0, column=0)
-        ttk.Button(folder_frame, text="찾아보기", command=self.choose_folder).grid(row=0, column=1, padx=(5, 0))
-        
-        # 진행 단계 표시
-        progress_frame = ttk.LabelFrame(main_frame, text="진행 단계", padding="10")
-        progress_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 20))
-        
+        # Total Pages
+        pages_layout = QHBoxLayout()
+        pages_layout.addWidget(QLabel("Total Pages:"))
+        self.total_pages_spinbox = QSpinBox()
+        self.total_pages_spinbox.setRange(1, 9999)
+        self.total_pages_spinbox.setValue(200)
+        pages_layout.addWidget(self.total_pages_spinbox)
+        settings_layout.addLayout(pages_layout)
+
+        # Page Key
+        key_layout = QHBoxLayout()
+        key_layout.addWidget(QLabel("Page Key:"))
+        self.page_key_combo = QComboBox()
+        self.page_key_combo.addItems(["Page Down", "Space", "Enter", "Right Arrow", "Down Arrow"])
+        self.page_key_combo.setCurrentText("Page Down")
+        key_layout.addWidget(self.page_key_combo)
+        settings_layout.addLayout(key_layout)
+
+        # Output Folder
+        folder_layout = QHBoxLayout()
+        self.output_folder_edit = QLineEdit(os.path.join(os.path.expanduser("~"), "Desktop"))
+        folder_layout.addWidget(self.output_folder_edit)
+        self.browse_button = QPushButton("Browse...")
+        self.browse_button.clicked.connect(self.choose_folder)
+        folder_layout.addWidget(self.browse_button)
+        settings_layout.addLayout(folder_layout)
+
+        settings_box.setContentLayout(settings_layout)
+
+        # --- Progress Steps ---
+        progress_frame = QFrame()
+        progress_frame.setFrameShape(QFrame.StyledPanel)
+        progress_layout = QVBoxLayout(progress_frame)
         self.step_labels = []
-        steps = ["1단계: 설정 완료", "2단계: 크롭 영역 선택", "3단계: 캡처 진행", 
-                "4단계: 크롭 & PDF 생성", "5단계: 완료"]
-        
-        for i, step in enumerate(steps):
-            label = ttk.Label(progress_frame, text=step, foreground="gray")
-            label.grid(row=i, column=0, sticky=tk.W, pady=2)
+        steps = ["1. Settings", "2. Select Area", "3. Capture", "4. Create PDF", "5. Complete"]
+        for step in steps:
+            label = QLabel(step)
+            label.setStyleSheet("color: gray;")
             self.step_labels.append(label)
+            progress_layout.addWidget(label)
+        main_layout.addWidget(progress_frame)
+
+        # --- Progress Bar & Label ---
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(False)
+        main_layout.addWidget(self.progress_bar)
+
+        self.progress_label = QLabel("Ready")
+        self.progress_label.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(self.progress_label)
+
+        # --- Control Buttons ---
+        button_layout = QHBoxLayout()
+        self.start_button = QPushButton("Start")
+        self.start_button.clicked.connect(self.start_process)
+        self.start_button.setObjectName("AccentButton")
+
+        self.pause_button = QPushButton("Pause")
+        self.pause_button.clicked.connect(self.pause_process)
+        self.pause_button.setEnabled(False)
+
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.clicked.connect(self.stop_process)
+        self.stop_button.setEnabled(False)
+
+        button_layout.addWidget(self.start_button)
+        button_layout.addWidget(self.pause_button)
+        button_layout.addWidget(self.stop_button)
+        main_layout.addLayout(button_layout)
         
-        # 진행률 바
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(progress_frame, variable=self.progress_var, 
-                                          maximum=100, length=400)
-        self.progress_bar.grid(row=len(steps), column=0, sticky=(tk.W, tk.E), pady=(10, 0))
+        # --- Log Area ---
+        log_box = CollapsibleBox("Logs")
+        main_layout.addWidget(log_box)
+        log_layout = QVBoxLayout()
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setFixedHeight(100)
+        log_layout.addWidget(self.log_text)
+        log_box.setContentLayout(log_layout)
         
-        self.progress_label = ttk.Label(progress_frame, text="준비 완료")
-        self.progress_label.grid(row=len(steps)+1, column=0, pady=5)
-        
-        # 버튼 섹션
-        button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=3, column=0, columnspan=2, pady=20)
-        
-        self.start_button = ttk.Button(button_frame, text="시작하기", 
-                                      command=self.start_process, style="Accent.TButton")
-        self.start_button.grid(row=0, column=0, padx=5)
-        
-        self.pause_button = ttk.Button(button_frame, text="일시정지", 
-                                      command=self.pause_process, state="disabled")
-        self.pause_button.grid(row=0, column=1, padx=5)
-        
-        self.stop_button = ttk.Button(button_frame, text="중단", 
-                                     command=self.stop_process, state="disabled")
-        self.stop_button.grid(row=0, column=2, padx=5)
-        
-        # 로그 섹션
-        log_frame = ttk.LabelFrame(main_frame, text="진행 로그", padding="10")
-        log_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
-        
-        # 스크롤 가능한 텍스트 위젯
-        self.log_text = tk.Text(log_frame, height=8, width=60, wrap=tk.WORD)
-        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=scrollbar.set)
-        
-        self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
-        
-        # 그리드 가중치 설정
-        main_frame.columnconfigure(1, weight=1)
-        log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
-        
-        self.log("프로그램이 시작되었습니다. 설정을 확인하고 '시작하기'를 클릭하세요.")
-    
+        self.setLayout(main_layout)
+        self.apply_stylesheet()
+        self.log("Application started. Check settings and click 'Start'.")
+
+    def apply_stylesheet(self):
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #2b2b2b;
+                color: #f0f0f0;
+                font-family: Arial;
+            }
+            QLabel {
+                background-color: transparent;
+            }
+            QPushButton {
+                background-color: #4a4a4a;
+                border: 1px solid #5a5a5a;
+                padding: 5px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #5a5a5a;
+            }
+            QPushButton:pressed {
+                background-color: #6a6a6a;
+            }
+            QPushButton#AccentButton {
+                background-color: #007acc;
+                font-weight: bold;
+            }
+            QPushButton#AccentButton:hover {
+                background-color: #008ae6;
+            }
+            QSpinBox, QComboBox, QLineEdit {
+                background-color: #3c3c3c;
+                border: 1px solid #5a5a5a;
+                padding: 3px;
+                border-radius: 3px;
+            }
+            QProgressBar {
+                border: 1px solid #5a5a5a;
+                border-radius: 3px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background-color: #007acc;
+                border-radius: 3px;
+            }
+            QTextEdit, QScrollArea {
+                background-color: #3c3c3c;
+                border: 1px solid #5a5a5a;
+                border-radius: 3px;
+            }
+            QFrame {
+                border: 1px solid #4a4a4a;
+                border-radius: 3px;
+            }
+        """)
+
     def log(self, message):
-        """로그 메시지 추가"""
         timestamp = datetime.now().strftime("%H:%M:%S")
-        log_message = f"[{timestamp}] {message}\n"
-        self.log_text.insert(tk.END, log_message)
-        self.log_text.see(tk.END)
-        self.root.update()
-    
-    def update_step(self, step_index, status="active"):
-        """진행 단계 업데이트"""
-        colors = {"active": "blue", "completed": "green", "pending": "gray"}
+        self.log_text.append(f"[{timestamp}] {message}")
+
+    def update_step(self, step_index, status):
+        colors = {"active": "#007acc", "completed": "#2a9d8f", "pending": "gray"}
+        font_weights = {"active": "bold", "completed": "normal", "pending": "normal"}
         
         for i, label in enumerate(self.step_labels):
             if i < step_index:
-                label.configure(foreground=colors["completed"])
+                label.setStyleSheet(f"color: {colors['completed']}; font-weight: {font_weights['completed']};")
             elif i == step_index:
-                label.configure(foreground=colors[status])
+                label.setStyleSheet(f"color: {colors[status]}; font-weight: {font_weights[status]};")
             else:
-                label.configure(foreground=colors["pending"])
-    
+                label.setStyleSheet(f"color: {colors['pending']}; font-weight: {font_weights['pending']};")
+
     def update_progress(self, value, text):
-        """진행률 업데이트"""
-        self.progress_var.set(value)
-        self.progress_label.configure(text=text)
-        self.root.update()
-    
+        self.progress_bar.setValue(value)
+        self.progress_label.setText(text)
+
     def choose_folder(self):
-        """저장 폴더 선택"""
-        folder = filedialog.askdirectory(initialdir=self.output_folder.get())
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder", self.output_folder_edit.text())
         if folder:
-            self.output_folder.set(folder)
+            self.output_folder_edit.setText(folder)
 
     def start_process(self):
-        """전체 프로세스 시작"""
-        self.log("프로세스를 시작합니다...")
-        self.update_step(0, "completed")
+        # Admin rights check
+        try:
+            is_admin = os.getuid() == 0
+        except AttributeError:
+            import ctypes
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
         
-        # 버튼 상태 변경
-        self.start_button.configure(state="disabled")
-        self.pause_button.configure(state="normal")
-        self.stop_button.configure(state="normal")
+        if not is_admin:
+            QMessageBox.warning(self, "Administrator Rights Required",
+                                "For the page-turning feature to work correctly,\n"
+                                "please run this application as an administrator.")
+            return
+
+        self.log("Starting process...")
+        self.comm.step_signal.emit(0, "completed")
+        self.start_button.setEnabled(False)
+        self.pause_button.setEnabled(True)
+        self.stop_button.setEnabled(True)
+
+        QMessageBox.information(self, "Prepare for Capture",
+                                "Please ensure:\n\n"
+                                "1. The document is open and on the first page.\n"
+                                "2. The document window is maximized.\n"
+                                "3. Other windows are minimized.\n\n"
+                                "Click OK to proceed to select the capture area.")
         
-        # 단계별 진행
-        if self.prepare_capture():
-            if self.select_crop_area():
-                self.start_capture()
-    
-    def prepare_capture(self):
-        """캡처 준비"""
-        self.log("캡처 준비 중...")
-        
-        # 사용자 안내
-        result = messagebox.askyesno(
-            "캡처 준비",
-            "캡처를 시작하기 전에 다음을 확인해주세요:\n\n"
-            "1. 캡처할 문서를 열어주세요\n"
-            "2. 첫 번째 페이지로 이동해주세요\n"
-            "3. 문서 창을 최대한 크게 키워주세요\n"
-            "4. 다른 창들을 최소화해주세요\n\n"
-            "준비가 완료되었나요?"
-        )
-        
-        if not result:
-            self.reset_ui()
-            return False
-        
-        self.log("캡처 준비 완료!")
-        return True
-    
+        self.select_crop_area()
+
     def select_crop_area(self):
-        """크롭 영역 선택"""
-        self.log("크롭 영역 선택을 시작합니다...")
-        self.update_step(1, "active")
+        self.log("Selecting crop area...")
+        self.comm.step_signal.emit(1, "active")
+        self.hide()
+        time.sleep(0.5)
         
-        # 첫 번째 스크린샷 촬영
-        time.sleep(2)  # 사용자가 준비할 시간
-        screenshot = pyautogui.screenshot()
-        temp_image_path = os.path.join(self.output_folder.get(), "temp_screenshot.png")
-        screenshot.save(temp_image_path)
-        
-        # 크롭 영역 선택
-        self.crop_area = self.select_crop_area_manually(temp_image_path)
-        
-        if self.crop_area is None:
-            self.log("크롭 영역 선택이 취소되었습니다.")
-            self.reset_ui()
-            return False
-        
-        # 임시 파일 삭제
-        try:
-            os.remove(temp_image_path)
-        except:
-            pass
-        
-        self.log(f"크롭 영역 선택 완료: {self.crop_area}")
-        self.update_step(1, "completed")
-        return True
-    
-    def select_crop_area_manually(self, image_path):
-        """사용자가 마우스로 크롭 영역을 직접 선택"""
-        self.log("마우스로 PDF 페이지 영역을 선택해주세요...")
-        
-        # 이미지 읽기
-        img = cv2.imread(image_path)
-        if img is None:
-            self.log("스크린샷을 읽을 수 없습니다!")
-            return None
-        
-        # 화면 크기에 맞게 조정
-        height, width = img.shape[:2]
-        max_display_width = 1200
-        max_display_height = 800
-        
-        if width > max_display_width or height > max_display_height:
-            scale_w = max_display_width / width
-            scale_h = max_display_height / height
-            scale = min(scale_w, scale_h)
-            
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-            
-            display_img = cv2.resize(img, (new_width, new_height))
-            scale_factor = scale
+        self.snipping_widget = SnippingWidget()
+        self.snipping_widget.on_snipped.connect(self.on_area_selected)
+        self.snipping_widget.show()
+
+    def on_area_selected(self, rect):
+        self.show()
+        if not rect.isEmpty():
+            self.crop_area = (rect.x(), rect.y(), rect.width(), rect.height())
+            self.log(f"Crop area selected: {self.crop_area}")
+            self.comm.step_signal.emit(1, "completed")
+            self.start_capture()
         else:
-            display_img = img.copy()
-            scale_factor = 1.0
-        
-        # 안내 메시지
-        messagebox.showinfo(
-            "크롭 영역 선택",
-            "마우스로 PDF 페이지 영역을 드래그하여 선택하세요!\n\n"
-            "• 마우스 드래그로 영역 선택\n"
-            "• SPACE 또는 ENTER: 선택 완료\n"
-            "• R: 다시 선택\n"
-            "• ESC: 취소"
-        )
-        
-        # ROI 선택
-        roi = cv2.selectROI("크롭 영역 선택 - PDF 페이지를 드래그하세요", 
-                           display_img, showCrosshair=True)
-        cv2.destroyAllWindows()
-        
-        x, y, w, h = roi
-        if w <= 0 or h <= 0:
-            return None
-        
-        # 원본 크기로 변환
-        if scale_factor != 1.0:
-            x = int(x / scale_factor)
-            y = int(y / scale_factor)
-            w = int(w / scale_factor)
-            h = int(h / scale_factor)
-        
-        # 범위 조정
-        orig_height, orig_width = img.shape[:2]
-        x = max(0, min(x, orig_width - 1))
-        y = max(0, min(y, orig_height - 1))
-        w = min(w, orig_width - x)
-        h = min(h, orig_height - y)
-        
-        # 확인
-        confirm = messagebox.askyesno(
-            "크롭 영역 확인",
-            f"선택된 크롭 영역:\n"
-            f"X: {x}, Y: {y}\n"
-            f"너비: {w}, 높이: {h}\n\n"
-            f"이 영역으로 진행하시겠습니까?"
-        )
-        
-        return (x, y, w, h) if confirm else None
-    
+            self.log("Crop area selection cancelled.")
+            self.reset_ui()
+
     def start_capture(self):
-        """캡처 시작"""
-        self.log("자동 캡처를 시작합니다...")
-        self.update_step(2, "active")
+        self.log("Starting automatic capture...")
         self.is_capturing = True
+        self.comm.step_signal.emit(2, "active")
         
-        # 백그라운드 쓰레드에서 캡처 실행
-        capture_thread = threading.Thread(target=self.capture_pages)
-        capture_thread.daemon = True
-        capture_thread.start()
-    
-    def capture_pages(self):
-        """페이지 캡처 실행"""
+        self.capture_thread = threading.Thread(target=self.capture_pages_task)
+        self.capture_thread.daemon = True
+        self.capture_thread.start()
+
+    def get_key(self):
+        key_map = {
+            "Page Down": "pagedown", "Space": "space", "Enter": "enter",
+            "Right Arrow": "right", "Down Arrow": "down"
+        }
+        return key_map.get(self.page_key_combo.currentText())
+
+    def capture_pages_task(self):
         try:
-            # 저장 폴더 생성
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.capture_folder = os.path.join(self.output_folder.get(), f"captured_pages_{timestamp}")
-            os.makedirs(self.capture_folder, exist_ok=True)
-            
-            self.log(f"캡처 폴더 생성: {self.capture_folder}")
-            
-            # 캡처 시작 전 잠시 대기
+            output_folder = self.output_folder_edit.text()
+            capture_folder = os.path.join(output_folder, f"captured_pages_{timestamp}")
+            os.makedirs(capture_folder, exist_ok=True)
+            self.comm.log_signal.emit(f"Capture folder created: {capture_folder}")
+
+            self.comm.log_signal.emit("Please click on the document window to focus it. Capture will start in 3 seconds...")
             time.sleep(3)
-            
-            success_count = 0
-            total_pages = self.total_pages.get()
-            
-            for page in range(1, total_pages + 1):
+
+            total = self.total_pages_spinbox.value()
+            page_key = self.get_key()
+
+            for page in range(1, total + 1):
                 if not self.is_capturing:
-                    self.log("캡처가 중단되었습니다.")
-                    break
-                
-                # 일시정지 체크
-                while self.is_paused and self.is_capturing:
+                    self.comm.log_signal.emit("Capture stopped by user.")
+                    return
+
+                while self.is_paused:
                     time.sleep(0.1)
-                
-                if not self.is_capturing:
-                    break
-                
-                self.current_page = page
-                
-                # 현재 페이지 캡처
-                self.log(f"페이지 {page}/{total_pages} 캡처 중...")
+
+                self.comm.log_signal.emit(f"Capturing page {page}/{total}...")
                 
                 screenshot = pyautogui.screenshot()
-                filename = f"page_{page:03d}.png"
-                filepath = os.path.join(self.capture_folder, filename)
+                filepath = os.path.join(capture_folder, f"page_{page:04d}.png")
                 screenshot.save(filepath)
+
+                progress = int((page / total) * 50) # Capture is first 50%
+                self.comm.progress_signal.emit(progress, f"Captured: {page}/{total}")
                 
-                success_count += 1
-                
-                # 진행률 업데이트
-                progress = (page / total_pages) * 50  # 50%까지가 캡처
-                self.update_progress(progress, f"캡처 진행: {page}/{total_pages}")
-                
-                # 마지막 페이지가 아니면 다음 페이지로
-                if page < total_pages and self.is_capturing:
-                    self.next_page()
-                    time.sleep(1.5)  # 페이지 로딩 대기
-            
+                if page < total:
+                    pyautogui.press(page_key)
+                    time.sleep(1.5) # Wait for page to load
+
             if self.is_capturing:
-                self.log(f"캡처 완료! {success_count}/{total_pages} 페이지 성공")
-                self.update_step(2, "completed")
-                self.start_crop_and_pdf()
-            
+                self.comm.log_signal.emit("Capture phase complete.")
+                self.comm.step_signal.emit(2, "completed")
+                self.crop_and_create_pdf_task(capture_folder, timestamp)
+
         except Exception as e:
-            self.log(f"캡처 중 오류 발생: {e}")
+            self.comm.log_signal.emit(f"Error during capture: {e}")
             self.reset_ui()
-    
-    def next_page(self):
-        """다음 페이지로 이동"""
-        key = self.page_key.get()
-        pyautogui.press(key)
-    
-    def start_crop_and_pdf(self):
-        """크롭 및 PDF 생성"""
-        self.log("크롭 및 PDF 생성을 시작합니다...")
-        self.update_step(3, "active")
-        
-        # 백그라운드에서 실행
-        crop_thread = threading.Thread(target=self.crop_and_create_pdf)
-        crop_thread.daemon = True
-        crop_thread.start()
-    
-    def crop_and_create_pdf(self):
-        """크롭 및 PDF 생성 실행"""
+
+    def crop_and_create_pdf_task(self, capture_folder, timestamp):
         try:
-            # 크롭 폴더 생성
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.cropped_folder = os.path.join(self.output_folder.get(), f"cropped_pages_{timestamp}")
-            os.makedirs(self.cropped_folder, exist_ok=True)
+            self.comm.log_signal.emit("Cropping and creating PDF...")
+            self.comm.step_signal.emit(3, "active")
             
-            # 캡처된 이미지들 가져오기
-            image_files = [f for f in os.listdir(self.capture_folder) if f.endswith('.png')]
-            image_files.sort()
-            
-            if not image_files:
-                self.log("캡처된 이미지가 없습니다!")
-                return
-            
-            self.log(f"총 {len(image_files)}개 이미지 크롭 중...")
-            
-            # 모든 이미지 크롭
-            success_count = 0
-            for i, img_file in enumerate(image_files, 1):
+            output_folder = self.output_folder_edit.text()
+            cropped_folder = os.path.join(output_folder, f"cropped_pages_{timestamp}")
+            os.makedirs(cropped_folder, exist_ok=True)
+
+            image_files = sorted([f for f in os.listdir(capture_folder) if f.endswith('.png')])
+            total_images = len(image_files)
+
+            for i, filename in enumerate(image_files, 1):
                 if not self.is_capturing:
-                    break
+                    self.comm.log_signal.emit("Process stopped during cropping.")
+                    return
+
+                input_path = os.path.join(capture_folder, filename)
+                output_path = os.path.join(cropped_folder, filename)
                 
-                input_path = os.path.join(self.capture_folder, img_file)
-                output_path = os.path.join(self.cropped_folder, img_file)
+                img = Image.open(input_path)
+                x, y, w, h = self.crop_area
+                cropped = img.crop((x, y, x + w, y + h))
+                cropped.save(output_path)
                 
-                if self.crop_image(input_path, self.crop_area, output_path):
-                    success_count += 1
-                
-                # 진행률 업데이트 (50-90%)
-                progress = 50 + (i / len(image_files)) * 40
-                self.update_progress(progress, f"크롭 진행: {i}/{len(image_files)}")
+                progress = 50 + int((i / total_images) * 40) # Cropping is 50-90%
+                self.comm.progress_signal.emit(progress, f"Cropping: {i}/{total_images}")
+
+            self.comm.log_signal.emit("Cropping complete. Creating PDF...")
+            self.comm.step_signal.emit(3, "completed")
+            self.comm.step_signal.emit(4, "active")
+            self.comm.progress_signal.emit(95, "Creating PDF...")
+
+            # Create PDF
+            pdf_path = os.path.join(output_folder, f"SUPER_CAPT_{timestamp}.pdf")
+            cropped_files = sorted([os.path.join(cropped_folder, f) for f in os.listdir(cropped_folder) if f.endswith('.png')])
             
-            if not self.is_capturing:
-                return
+            if not cropped_files:
+                raise ValueError("No cropped images found to create PDF.")
+
+            first_image = Image.open(cropped_files[0]).convert("RGB")
+            other_images = [Image.open(f).convert("RGB") for f in cropped_files[1:]]
             
-            self.log(f"크롭 완료! {success_count}/{len(image_files)} 성공")
+            first_image.save(pdf_path, save_all=True, append_images=other_images, resolution=150.0)
             
-            # PDF 생성
-            self.log("PDF 생성 중...")
-            output_pdf = os.path.join(self.output_folder.get(), f"final_book_{timestamp}.pdf")
-            
-            if self.create_pdf_from_images(self.cropped_folder, output_pdf):
-                self.update_progress(100, "완료!")
-                self.update_step(4, "completed")
-                self.log(f"모든 작업 완료! PDF 생성: {output_pdf}")
-                
-                # 완료 처리
-                self.root.after(0, lambda: self.process_completed(output_pdf))
-            else:
-                self.log("PDF 생성 실패!")
-                
+            self.comm.log_signal.emit(f"PDF created successfully: {pdf_path}")
+            self.comm.finished_signal.emit(pdf_path)
+
         except Exception as e:
-            self.log(f"크롭/PDF 생성 중 오류: {e}")
+            self.comm.log_signal.emit(f"Error during PDF creation: {e}")
             self.reset_ui()
-    
-    def crop_image(self, image_path, crop_area, output_path):
-        """이미지 크롭"""
-        try:
-            img = Image.open(image_path)
-            x, y, w, h = crop_area
-            cropped = img.crop((x, y, x + w, y + h))
-            cropped.save(output_path)
-            return True
-        except Exception as e:
-            self.log(f"크롭 실패 {image_path}: {e}")
-            return False
-    
-    def create_pdf_from_images(self, folder_path, output_pdf):
-        """이미지들을 PDF로 변환"""
-        try:
-            image_files = [f for f in os.listdir(folder_path) if f.endswith('.png')]
-            image_files.sort()
-            
-            if not image_files:
-                return False
-            
-            # 첫 번째 이미지로 PDF 생성
-            first_image_path = os.path.join(folder_path, image_files[0])
-            first_image = Image.open(first_image_path)
-            
-            if first_image.mode != 'RGB':
-                first_image = first_image.convert('RGB')
-            
-            # 나머지 이미지들
-            other_images = []
-            for img_file in image_files[1:]:
-                img_path = os.path.join(folder_path, img_file)
-                img = Image.open(img_path)
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
-                other_images.append(img)
-            
-            # PDF 저장
-            first_image.save(output_pdf, save_all=True, append_images=other_images, 
-                           resolution=200.0, quality=95)
-            
-            return True
-            
-        except Exception as e:
-            self.log(f"PDF 생성 실패: {e}")
-            return False
 
     def pause_process(self):
-        """프로세스 일시정지/재개"""
+        self.is_paused = not self.is_paused
         if self.is_paused:
-            self.is_paused = False
-            self.pause_button.configure(text="일시정지")
-            self.log("캡처 재개됨")
+            self.pause_button.setText("Resume")
+            self.log("Process paused.")
         else:
-            self.is_paused = True
-            self.pause_button.configure(text="재개")
-            self.log("캡처 일시정지됨")
-    
+            self.pause_button.setText("Pause")
+            self.log("Process resumed.")
+
     def stop_process(self):
-        """프로세스 중단"""
-        result = messagebox.askyesno("중단 확인", "정말로 작업을 중단하시겠습니까?")
-        if result:
+        if QMessageBox.question(self, "Confirm Stop", "Are you sure you want to stop the process?") == QMessageBox.Yes:
             self.is_capturing = False
-            self.is_paused = False
-            self.log("작업이 중단되었습니다.")
+            self.log("Process stopping...")
             self.reset_ui()
-    
+
     def reset_ui(self):
-        """UI 초기화"""
-        self.start_button.configure(state="normal")
-        self.pause_button.configure(state="disabled", text="일시정지")
-        self.stop_button.configure(state="disabled")
-        self.progress_var.set(0)
-        self.progress_label.configure(text="준비 완료")
+        self.start_button.setEnabled(True)
+        self.pause_button.setEnabled(False)
+        self.pause_button.setText("Pause")
+        self.stop_button.setEnabled(False)
+        self.update_progress(0, "Ready")
         self.update_step(-1, "pending")
         self.is_capturing = False
         self.is_paused = False
-    
-    def process_completed(self, output_pdf):
-        """프로세스 완료 처리"""
+
+    def process_completed(self, pdf_path):
         self.reset_ui()
-        self.update_step(4, "completed")
+        self.comm.progress_signal.emit(100, "Complete!")
+        self.comm.step_signal.emit(4, "completed")
+
+        reply = QMessageBox.information(self, "Success!",
+                                        f"PDF created successfully!\n\nPath: {pdf_path}",
+                                        QMessageBox.Ok | QMessageBox.Open)
         
-        # 완료 메시지
-        result = messagebox.askyesno(
-            "작업 완료!",
-            f"PDF 생성이 완료되었습니다!\n\n"
-            f"파일 위치: {output_pdf}\n\n"
-            f"PDF 파일을 바로 열어보시겠습니까?"
-        )
-        
-        if result:
+        if reply == QMessageBox.Open:
             try:
-                os.startfile(output_pdf)
+                os.startfile(pdf_path)
             except Exception as e:
-                self.log(f"PDF 파일 열기 실패: {e}")
-        
-        self.log("모든 작업이 완료되었습니다!")
+                self.log(f"Failed to open PDF: {e}")
 
-def main():
-    """메인 실행 함수"""
-    # 필요한 라이브러리 확인
-    try:
-        import pyautogui
-        import cv2
-        import PIL
-    except ImportError as e:
-        missing_lib = str(e).split("'")[1] if "'" in str(e) else "알 수 없는 라이브러리"
-        
-        root = tk.Tk()
-        root.withdraw()
-        
-        messagebox.showerror(
-            "라이브러리 누락",
-            f"필요한 라이브러리가 설치되지 않았습니다: {missing_lib}\n\n"
-            f"다음 명령어로 설치해주세요:\n"
-            f"pip install pyautogui opencv-python pillow"
-        )
-        return
-    
-    # GUI 실행
-    root = tk.Tk()
-    app = PDFCaptureApp(root)
-    
-    # 종료 처리
-    def on_closing():
-        if app.is_capturing:
-            result = messagebox.askyesno(
-                "종료 확인", 
-                "작업이 진행 중입니다. 정말로 종료하시겠습니까?"
-            )
-            if result:
-                app.is_capturing = False
-                root.destroy()
+    def closeEvent(self, event):
+        if self.is_capturing:
+            reply = QMessageBox.question(self, 'Confirm Exit',
+                                         "A capture process is running. Are you sure you want to exit?",
+                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.is_capturing = False
+                if self.capture_thread:
+                    self.capture_thread.join(timeout=2) # Wait briefly for thread to exit
+                event.accept()
+            else:
+                event.ignore()
         else:
-            root.destroy()
-    
-    root.protocol("WM_DELETE_WINDOW", on_closing)
-    
-    # 환영 메시지
-    messagebox.showinfo(
-        "환영합니다!",
-        "올인원 PDF 캡처 & 크롭 프로그램에 오신 것을 환영합니다!\n\n"
-        "이 프로그램으로 다음을 한 번에 할 수 있습니다:\n"
-        "• 문서 자동 캡처\n"
-        "• 원하는 영역 크롭\n"
-        "• 고품질 PDF 생성\n\n"
-        "사용법:\n"
-        "1. 설정을 확인하세요\n"
-        "2. '시작하기' 버튼을 클릭하세요\n"
-        "3. 안내에 따라 진행하세요"
-    )
-    
-    root.mainloop()
+            event.accept()
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    ex = SuperCaptApp()
+    ex.show()
+    sys.exit(app.exec())
