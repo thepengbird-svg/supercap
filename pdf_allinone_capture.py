@@ -3,6 +3,7 @@
 """
 SUPER CAPT - All-in-One PDF Capture & Crop Tool
 User-friendly GUI for fully automated screen capture to PDF creation.
+Now with automatic administrator rights elevation.
 """
 
 import sys
@@ -10,6 +11,7 @@ import os
 import time
 import threading
 import subprocess
+import ctypes # 추가된 부분
 from datetime import datetime
 
 # --- Library Installation Check ---
@@ -136,24 +138,19 @@ class SuperCaptApp(QWidget):
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.setFixedWidth(400)
 
-        # --- Main Layout ---
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(15, 15, 15, 15)
         main_layout.setSpacing(10)
 
-        # --- Title ---
         title_label = QLabel("SUPER CAPT")
         title_label.setFont(QFont("Arial", 16, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
 
-        # --- Collapsible Settings ---
         settings_box = CollapsibleBox("Settings")
         main_layout.addWidget(settings_box)
-        
         settings_layout = QVBoxLayout()
         
-        # Total Pages
         pages_layout = QHBoxLayout()
         pages_layout.addWidget(QLabel("Total Pages:"))
         self.total_pages_spinbox = QSpinBox()
@@ -162,7 +159,6 @@ class SuperCaptApp(QWidget):
         pages_layout.addWidget(self.total_pages_spinbox)
         settings_layout.addLayout(pages_layout)
 
-        # Page Key
         key_layout = QHBoxLayout()
         key_layout.addWidget(QLabel("Page Key:"))
         self.page_key_combo = QComboBox()
@@ -171,7 +167,6 @@ class SuperCaptApp(QWidget):
         key_layout.addWidget(self.page_key_combo)
         settings_layout.addLayout(key_layout)
 
-        # Output Folder
         folder_layout = QHBoxLayout()
         self.output_folder_edit = QLineEdit(os.path.join(os.path.expanduser("~"), "Desktop"))
         folder_layout.addWidget(self.output_folder_edit)
@@ -182,7 +177,6 @@ class SuperCaptApp(QWidget):
 
         settings_box.setContentLayout(settings_layout)
 
-        # --- Progress Steps ---
         progress_frame = QFrame()
         progress_frame.setFrameShape(QFrame.StyledPanel)
         progress_layout = QVBoxLayout(progress_frame)
@@ -195,7 +189,6 @@ class SuperCaptApp(QWidget):
             progress_layout.addWidget(label)
         main_layout.addWidget(progress_frame)
 
-        # --- Progress Bar & Label ---
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(False)
         main_layout.addWidget(self.progress_bar)
@@ -204,7 +197,6 @@ class SuperCaptApp(QWidget):
         self.progress_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(self.progress_label)
 
-        # --- Control Buttons ---
         button_layout = QHBoxLayout()
         self.start_button = QPushButton("Start")
         self.start_button.clicked.connect(self.start_process)
@@ -223,7 +215,6 @@ class SuperCaptApp(QWidget):
         button_layout.addWidget(self.stop_button)
         main_layout.addLayout(button_layout)
         
-        # --- Log Area ---
         log_box = CollapsibleBox("Logs")
         main_layout.addWidget(log_box)
         log_layout = QVBoxLayout()
@@ -239,57 +230,18 @@ class SuperCaptApp(QWidget):
 
     def apply_stylesheet(self):
         self.setStyleSheet("""
-            QWidget {
-                background-color: #2b2b2b;
-                color: #f0f0f0;
-                font-family: Arial;
-            }
-            QLabel {
-                background-color: transparent;
-            }
-            QPushButton {
-                background-color: #4a4a4a;
-                border: 1px solid #5a5a5a;
-                padding: 5px;
-                border-radius: 3px;
-            }
-            QPushButton:hover {
-                background-color: #5a5a5a;
-            }
-            QPushButton:pressed {
-                background-color: #6a6a6a;
-            }
-            QPushButton#AccentButton {
-                background-color: #007acc;
-                font-weight: bold;
-            }
-            QPushButton#AccentButton:hover {
-                background-color: #008ae6;
-            }
-            QSpinBox, QComboBox, QLineEdit {
-                background-color: #3c3c3c;
-                border: 1px solid #5a5a5a;
-                padding: 3px;
-                border-radius: 3px;
-            }
-            QProgressBar {
-                border: 1px solid #5a5a5a;
-                border-radius: 3px;
-                text-align: center;
-            }
-            QProgressBar::chunk {
-                background-color: #007acc;
-                border-radius: 3px;
-            }
-            QTextEdit, QScrollArea {
-                background-color: #3c3c3c;
-                border: 1px solid #5a5a5a;
-                border-radius: 3px;
-            }
-            QFrame {
-                border: 1px solid #4a4a4a;
-                border-radius: 3px;
-            }
+            QWidget { background-color: #2b2b2b; color: #f0f0f0; font-family: Arial; }
+            QLabel { background-color: transparent; }
+            QPushButton { background-color: #4a4a4a; border: 1px solid #5a5a5a; padding: 5px; border-radius: 3px; }
+            QPushButton:hover { background-color: #5a5a5a; }
+            QPushButton:pressed { background-color: #6a6a6a; }
+            QPushButton#AccentButton { background-color: #007acc; font-weight: bold; }
+            QPushButton#AccentButton:hover { background-color: #008ae6; }
+            QSpinBox, QComboBox, QLineEdit { background-color: #3c3c3c; border: 1px solid #5a5a5a; padding: 3px; border-radius: 3px; }
+            QProgressBar { border: 1px solid #5a5a5a; border-radius: 3px; text-align: center; }
+            QProgressBar::chunk { background-color: #007acc; border-radius: 3px; }
+            QTextEdit, QScrollArea { background-color: #3c3c3c; border: 1px solid #5a5a5a; border-radius: 3px; }
+            QFrame { border: 1px solid #4a4a4a; border-radius: 3px; }
         """)
 
     def log(self, message):
@@ -318,19 +270,6 @@ class SuperCaptApp(QWidget):
             self.output_folder_edit.setText(folder)
 
     def start_process(self):
-        # Admin rights check
-        try:
-            is_admin = os.getuid() == 0
-        except AttributeError:
-            import ctypes
-            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
-        
-        if not is_admin:
-            QMessageBox.warning(self, "Administrator Rights Required",
-                                "For the page-turning feature to work correctly,\n"
-                                "please run this application as an administrator.")
-            return
-
         self.log("Starting process...")
         self.comm.step_signal.emit(0, "completed")
         self.start_button.setEnabled(False)
@@ -340,8 +279,7 @@ class SuperCaptApp(QWidget):
         QMessageBox.information(self, "Prepare for Capture",
                                 "Please ensure:\n\n"
                                 "1. The document is open and on the first page.\n"
-                                "2. The document window is maximized.\n"
-                                "3. Other windows are minimized.\n\n"
+                                "2. The document window is maximized.\n\n"
                                 "Click OK to proceed to select the capture area.")
         
         self.select_crop_area()
@@ -377,10 +315,7 @@ class SuperCaptApp(QWidget):
         self.capture_thread.start()
 
     def get_key(self):
-        key_map = {
-            "Page Down": "pagedown", "Space": "space", "Enter": "enter",
-            "Right Arrow": "right", "Down Arrow": "down"
-        }
+        key_map = {"Page Down": "pagedown", "Space": "space", "Enter": "enter", "Right Arrow": "right", "Down Arrow": "down"}
         return key_map.get(self.page_key_combo.currentText())
 
     def capture_pages_task(self):
@@ -391,7 +326,7 @@ class SuperCaptApp(QWidget):
             os.makedirs(capture_folder, exist_ok=True)
             self.comm.log_signal.emit(f"Capture folder created: {capture_folder}")
 
-            self.comm.log_signal.emit("Please click on the document window to focus it. Capture will start in 3 seconds...")
+            self.comm.log_signal.emit("Please click on the document window. Capture will start in 3 seconds...")
             time.sleep(3)
 
             total = self.total_pages_spinbox.value()
@@ -401,28 +336,24 @@ class SuperCaptApp(QWidget):
                 if not self.is_capturing:
                     self.comm.log_signal.emit("Capture stopped by user.")
                     return
-
-                while self.is_paused:
-                    time.sleep(0.1)
-
+                while self.is_paused: time.sleep(0.1)
                 self.comm.log_signal.emit(f"Capturing page {page}/{total}...")
                 
                 screenshot = pyautogui.screenshot()
                 filepath = os.path.join(capture_folder, f"page_{page:04d}.png")
                 screenshot.save(filepath)
 
-                progress = int((page / total) * 50) # Capture is first 50%
+                progress = int((page / total) * 50)
                 self.comm.progress_signal.emit(progress, f"Captured: {page}/{total}")
                 
                 if page < total:
                     pyautogui.press(page_key)
-                    time.sleep(1.5) # Wait for page to load
+                    time.sleep(1.5)
 
             if self.is_capturing:
                 self.comm.log_signal.emit("Capture phase complete.")
                 self.comm.step_signal.emit(2, "completed")
                 self.crop_and_create_pdf_task(capture_folder, timestamp)
-
         except Exception as e:
             self.comm.log_signal.emit(f"Error during capture: {e}")
             self.reset_ui()
@@ -447,12 +378,12 @@ class SuperCaptApp(QWidget):
                 input_path = os.path.join(capture_folder, filename)
                 output_path = os.path.join(cropped_folder, filename)
                 
-                img = Image.open(input_path)
-                x, y, w, h = self.crop_area
-                cropped = img.crop((x, y, x + w, y + h))
-                cropped.save(output_path)
+                with Image.open(input_path) as img:
+                    x, y, w, h = self.crop_area
+                    cropped = img.crop((x, y, x + w, y + h))
+                    cropped.save(output_path)
                 
-                progress = 50 + int((i / total_images) * 40) # Cropping is 50-90%
+                progress = 50 + int((i / total_images) * 40)
                 self.comm.progress_signal.emit(progress, f"Cropping: {i}/{total_images}")
 
             self.comm.log_signal.emit("Cropping complete. Creating PDF...")
@@ -460,21 +391,16 @@ class SuperCaptApp(QWidget):
             self.comm.step_signal.emit(4, "active")
             self.comm.progress_signal.emit(95, "Creating PDF...")
 
-            # Create PDF
             pdf_path = os.path.join(output_folder, f"SUPER_CAPT_{timestamp}.pdf")
             cropped_files = sorted([os.path.join(cropped_folder, f) for f in os.listdir(cropped_folder) if f.endswith('.png')])
-            
-            if not cropped_files:
-                raise ValueError("No cropped images found to create PDF.")
+            if not cropped_files: raise ValueError("No cropped images found.")
 
-            first_image = Image.open(cropped_files[0]).convert("RGB")
-            other_images = [Image.open(f).convert("RGB") for f in cropped_files[1:]]
-            
-            first_image.save(pdf_path, save_all=True, append_images=other_images, resolution=150.0)
+            with Image.open(cropped_files[0]).convert("RGB") as first_image:
+                other_images = [Image.open(f).convert("RGB") for f in cropped_files[1:]]
+                first_image.save(pdf_path, save_all=True, append_images=other_images, resolution=150.0)
             
             self.comm.log_signal.emit(f"PDF created successfully: {pdf_path}")
             self.comm.finished_signal.emit(pdf_path)
-
         except Exception as e:
             self.comm.log_signal.emit(f"Error during PDF creation: {e}")
             self.reset_ui()
@@ -489,15 +415,14 @@ class SuperCaptApp(QWidget):
             self.log("Process resumed.")
 
     def stop_process(self):
-        if QMessageBox.question(self, "Confirm Stop", "Are you sure you want to stop the process?") == QMessageBox.Yes:
+        if QMessageBox.question(self, "Confirm Stop", "Are you sure you want to stop?") == QMessageBox.Yes:
             self.is_capturing = False
             self.log("Process stopping...")
             self.reset_ui()
 
     def reset_ui(self):
         self.start_button.setEnabled(True)
-        self.pause_button.setEnabled(False)
-        self.pause_button.setText("Pause")
+        self.pause_button.setEnabled(False); self.pause_button.setText("Pause")
         self.stop_button.setEnabled(False)
         self.update_progress(0, "Ready")
         self.update_step(-1, "pending")
@@ -508,11 +433,7 @@ class SuperCaptApp(QWidget):
         self.reset_ui()
         self.comm.progress_signal.emit(100, "Complete!")
         self.comm.step_signal.emit(4, "completed")
-
-        reply = QMessageBox.information(self, "Success!",
-                                        f"PDF created successfully!\n\nPath: {pdf_path}",
-                                        QMessageBox.Ok | QMessageBox.Open)
-        
+        reply = QMessageBox.information(self, "Success!", f"PDF created successfully!\n\nPath: {pdf_path}", QMessageBox.Ok | QMessageBox.Open)
         if reply == QMessageBox.Open:
             try:
                 os.startfile(pdf_path)
@@ -521,21 +442,32 @@ class SuperCaptApp(QWidget):
 
     def closeEvent(self, event):
         if self.is_capturing:
-            reply = QMessageBox.question(self, 'Confirm Exit',
-                                         "A capture process is running. Are you sure you want to exit?",
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            reply = QMessageBox.question(self, 'Confirm Exit', "A capture process is running. Exit anyway?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.Yes:
                 self.is_capturing = False
-                if self.capture_thread:
-                    self.capture_thread.join(timeout=2) # Wait briefly for thread to exit
+                if self.capture_thread: self.capture_thread.join(timeout=2)
                 event.accept()
             else:
                 event.ignore()
         else:
             event.accept()
 
+# --- 자동 관리자 권한 실행을 위한 함수 및 로직 ---
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
 if __name__ == '__main__':
-    app = QApplication(sys.argv)
-    ex = SuperCaptApp()
-    ex.show()
-    sys.exit(app.exec())
+    # 스크립트가 관리자 권한으로 실행되었는지 확인
+    if is_admin():
+        # 관리자 권한이 있으면, 정상적으로 앱 실행
+        app = QApplication(sys.argv)
+        ex = SuperCaptApp()
+        ex.show()
+        sys.exit(app.exec())
+    else:
+        # 관리자 권한이 없으면, UAC 프롬프트를 띄워서 관리자 권한으로 다시 실행
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+        sys.exit()
